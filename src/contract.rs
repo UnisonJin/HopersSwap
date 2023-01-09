@@ -14,7 +14,7 @@ use std::str::FromStr;
 use crate::error::ContractError;
 use crate::msg::{
     ExecuteMsg, FeeResponse, InfoResponse, InstantiateMsg, MigrateMsg, QueryMsg,
-    Token1ForToken2PriceResponse, Token2ForToken1PriceResponse, TokenSelect,
+    Token1ForToken2PriceResponse, Token2ForToken1PriceResponse, TokenSelect, WalletInfo,
 };
 use crate::state::{Fees, Token, FEES, LP_TOKEN, OWNER, TOKEN1, TOKEN2};
 
@@ -54,7 +54,16 @@ pub fn instantiate(
     let owner = msg.owner.map(|h| deps.api.addr_validate(&h)).transpose()?;
     OWNER.save(deps.storage, &owner)?;
 
-    let protocol_fee_recipient = deps.api.addr_validate(&msg.protocol_fee_recipient)?;
+    let mut total_ratio = Decimal::zero();
+    for dev_wallet in msg.dev_wallet_lists.clone() {
+        deps.api.addr_validate(&dev_wallet.address)?;
+        total_ratio = total_ratio + dev_wallet.ratio;
+    }
+
+    if total_ratio != Decimal::one() {
+        return Err(ContractError::WrongRatio {});
+    }
+
     let total_fee_percent = msg.lp_fee_percent + msg.protocol_fee_percent;
     let max_fee_percent = Decimal::from_str(MAX_FEE_PERCENT)?;
     if total_fee_percent > max_fee_percent {
@@ -67,7 +76,7 @@ pub fn instantiate(
     let fees = Fees {
         lp_fee_percent: msg.lp_fee_percent,
         protocol_fee_percent: msg.protocol_fee_percent,
-        protocol_fee_recipient,
+        dev_wallet_lists: msg.dev_wallet_lists,
     };
     FEES.save(deps.storage, &fees)?;
 
@@ -174,7 +183,7 @@ pub fn execute(
         ),
         ExecuteMsg::UpdateConfig {
             owner,
-            protocol_fee_recipient,
+            dev_wallet_lists,
             lp_fee_percent,
             protocol_fee_percent,
         } => execute_update_config(
@@ -183,7 +192,7 @@ pub fn execute(
             owner,
             lp_fee_percent,
             protocol_fee_percent,
-            protocol_fee_recipient,
+            dev_wallet_lists,
         ),
     }
 }
@@ -248,6 +257,7 @@ pub fn execute_add_liquidity(
     max_token2: Uint128,
     expiration: Option<Expiration>,
 ) -> Result<Response, ContractError> {
+    let action = "add_liquidity".to_string();
     check_expiration(&expiration, &env.block)?;
 
     let token1 = TOKEN1.load(deps.storage)?;
@@ -328,6 +338,7 @@ pub fn execute_add_liquidity(
         .add_messages(transfer_msgs)
         .add_message(mint_msg)
         .add_attributes(vec![
+            attr("action", action),
             attr("token1_amount", token1_amount),
             attr("token2_amount", token2_amount),
             attr("liquidity_received", liquidity_amount),
@@ -438,7 +449,7 @@ pub fn execute_update_config(
     new_owner: Option<String>,
     lp_fee_percent: Decimal,
     protocol_fee_percent: Decimal,
-    protocol_fee_recipient: String,
+    dev_wallet_lists: Vec<WalletInfo>,
 ) -> Result<Response, ContractError> {
     let owner = OWNER.load(deps.storage)?;
     if Some(info.sender) != owner {
@@ -460,9 +471,18 @@ pub fn execute_update_config(
         });
     }
 
-    let protocol_fee_recipient = deps.api.addr_validate(&protocol_fee_recipient)?;
+    let mut total_ratio = Decimal::zero();
+    for dev_wallet in dev_wallet_lists.clone() {
+        deps.api.addr_validate(&dev_wallet.address)?;
+        total_ratio = total_ratio + dev_wallet.ratio;
+    }
+
+    if total_ratio != Decimal::one() {
+        return Err(ContractError::WrongRatio {});
+    }
+
     let updated_fees = Fees {
-        protocol_fee_recipient: protocol_fee_recipient.clone(),
+        dev_wallet_lists,
         lp_fee_percent,
         protocol_fee_percent,
     };
@@ -473,7 +493,6 @@ pub fn execute_update_config(
         attr("new_owner", new_owner),
         attr("lp_fee_percent", lp_fee_percent.to_string()),
         attr("protocol_fee_percent", protocol_fee_percent.to_string()),
-        attr("protocol_fee_recipient", protocol_fee_recipient.to_string()),
     ]))
 }
 
@@ -486,6 +505,7 @@ pub fn execute_remove_liquidity(
     min_token2: Uint128,
     expiration: Option<Expiration>,
 ) -> Result<Response, ContractError> {
+    let action = "remove_liquidity".to_string();
     check_expiration(&expiration, &env.block)?;
 
     let lp_token_addr = LP_TOKEN.load(deps.storage)?;
@@ -559,6 +579,7 @@ pub fn execute_remove_liquidity(
             lp_token_burn_msg,
         ])
         .add_attributes(vec![
+            attr("action", action),
             attr("liquidity_burned", amount),
             attr("token1_returned", token1_amount),
             attr("token2_returned", token2_amount),
@@ -695,6 +716,7 @@ pub fn execute_swap(
     min_token: Uint128,
     expiration: Option<Expiration>,
 ) -> Result<Response, ContractError> {
+    let action = "swap".to_string();
     check_expiration(&expiration, &_env.block)?;
 
     let input_token_item = match input_token_enum {
@@ -741,13 +763,17 @@ pub fn execute_swap(
     };
 
     // Send protocol fee to protocol fee recipient
-    if !protocol_fee_amount.is_zero() {
-        msgs.push(get_fee_transfer_msg(
-            &info.sender,
-            &fees.protocol_fee_recipient,
-            &input_token.denom,
-            protocol_fee_amount,
-        )?)
+
+    for dev_wallet in fees.dev_wallet_lists {
+        let fee_amount = protocol_fee_amount * dev_wallet.ratio;
+        if !fee_amount.is_zero() {
+            msgs.push(get_fee_transfer_msg(
+                &info.sender,
+                &deps.api.addr_validate(&dev_wallet.address)?,
+                &input_token.denom,
+                fee_amount,
+            )?)
+        }
     }
 
     let recipient = deps.api.addr_validate(&recipient)?;
@@ -780,6 +806,7 @@ pub fn execute_swap(
     )?;
 
     Ok(Response::new().add_messages(msgs).add_attributes(vec![
+        attr("action", action),
         attr("native_sold", input_amount),
         attr("token_bought", token_bought),
     ]))
@@ -837,13 +864,16 @@ pub fn execute_pass_through_swap(
     };
 
     // Send protocol fee to protocol fee recipient
-    if !protocol_fee_amount.is_zero() {
-        msgs.push(get_fee_transfer_msg(
-            &info.sender,
-            &fees.protocol_fee_recipient,
-            &input_token.denom,
-            protocol_fee_amount,
-        )?)
+    for dev_wallet in fees.dev_wallet_lists {
+        let fee_amount = protocol_fee_amount * dev_wallet.ratio;
+        if !fee_amount.is_zero() {
+            msgs.push(get_fee_transfer_msg(
+                &info.sender,
+                &deps.api.addr_validate(&dev_wallet.address)?,
+                &input_token.denom,
+                fee_amount,
+            )?)
+        }
     }
 
     let output_amm_address = deps.api.addr_validate(&output_amm_address)?;
@@ -991,7 +1021,7 @@ pub fn query_fee(deps: Deps) -> StdResult<FeeResponse> {
         owner,
         lp_fee_percent: fees.lp_fee_percent,
         protocol_fee_percent: fees.protocol_fee_percent,
-        protocol_fee_recipient: fees.protocol_fee_recipient.into_string(),
+        dev_wallet_lists: fees.dev_wallet_lists,
     })
 }
 
@@ -1023,7 +1053,15 @@ pub fn migrate(deps: DepsMut, _env: Env, msg: MigrateMsg) -> Result<Response, Co
     };
     OWNER.save(deps.storage, &owner)?;
 
-    let protocol_fee_recipient = deps.api.addr_validate(&msg.protocol_fee_recipient)?;
+    let mut total_ratio = Decimal::zero();
+    for dev_wallet in msg.dev_wallet_lists.clone() {
+        deps.api.addr_validate(&dev_wallet.address)?;
+        total_ratio = total_ratio + dev_wallet.ratio;
+    }
+    if total_ratio != Decimal::one() {
+        return Err(ContractError::WrongRatio {});
+    }
+
     let total_fee_percent = msg.lp_fee_percent + msg.protocol_fee_percent;
     let max_fee_percent = Decimal::from_str(MAX_FEE_PERCENT)?;
     if total_fee_percent > max_fee_percent {
@@ -1036,7 +1074,7 @@ pub fn migrate(deps: DepsMut, _env: Env, msg: MigrateMsg) -> Result<Response, Co
     let fees = Fees {
         lp_fee_percent: msg.lp_fee_percent,
         protocol_fee_percent: msg.protocol_fee_percent,
-        protocol_fee_recipient,
+        dev_wallet_lists: msg.dev_wallet_lists,
     };
     FEES.save(deps.storage, &fees)?;
 

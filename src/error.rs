@@ -12,6 +12,9 @@ pub enum ContractError {
     #[error("None Error")]
     NoneError {},
 
+    #[error("The sum of ratino is not the same as 1")]
+    WrongRatio {},
+
     #[error("Unauthorized")]
     Unauthorized {},
     // Add any other custom errors you like here.

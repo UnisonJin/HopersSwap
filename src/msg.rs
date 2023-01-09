@@ -11,12 +11,12 @@ pub struct InstantiateMsg {
     pub token2_denom: Denom,
     pub lp_token_code_id: u64,
     pub owner: Option<String>,
-    pub protocol_fee_recipient: String,
     // NOTE: Fees percents are out of 100 e.g., 1 = 1%
     pub protocol_fee_percent: Decimal,
     pub lp_fee_percent: Decimal,
     pub lp_token_name: String,
     pub lp_token_symbol: String,
+    pub dev_wallet_lists: Vec<WalletInfo>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -65,7 +65,7 @@ pub enum ExecuteMsg {
         owner: Option<String>,
         lp_fee_percent: Decimal,
         protocol_fee_percent: Decimal,
-        protocol_fee_recipient: String,
+        dev_wallet_lists: Vec<WalletInfo>,
     },
 }
 
@@ -88,7 +88,7 @@ pub enum QueryMsg {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct MigrateMsg {
     pub owner: Option<String>,
-    pub protocol_fee_recipient: String,
+    pub dev_wallet_lists: Vec<WalletInfo>,
     pub protocol_fee_percent: Decimal,
     pub lp_fee_percent: Decimal,
 }
@@ -108,7 +108,7 @@ pub struct FeeResponse {
     pub owner: Option<String>,
     pub lp_fee_percent: Decimal,
     pub protocol_fee_percent: Decimal,
-    pub protocol_fee_recipient: String,
+    pub dev_wallet_lists: Vec<WalletInfo>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
@@ -119,4 +119,10 @@ pub struct Token1ForToken2PriceResponse {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct Token2ForToken1PriceResponse {
     pub token1_amount: Uint128,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
+pub struct WalletInfo {
+    pub address: String,
+    pub ratio: Decimal,
 }
