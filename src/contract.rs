@@ -4,7 +4,7 @@ use cosmwasm_std::{
     WasmMsg,
 };
 use cw0::parse_reply_instantiate_data;
-use cw2::set_contract_version;
+use cw2::{get_contract_version, set_contract_version};
 use cw20::Denom::Cw20;
 use cw20::{Cw20ExecuteMsg, Denom, Expiration, MinterResponse};
 use cw20_base::contract::query_balance;
@@ -1046,37 +1046,19 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn migrate(deps: DepsMut, _env: Env, msg: MigrateMsg) -> Result<Response, ContractError> {
-    let owner = match msg.owner {
-        None => None,
-        Some(o) => Some(deps.api.addr_validate(&o)?),
-    };
-    OWNER.save(deps.storage, &owner)?;
-
-    let mut total_ratio = Decimal::zero();
-    for dev_wallet in msg.dev_wallet_lists.clone() {
-        deps.api.addr_validate(&dev_wallet.address)?;
-        total_ratio = total_ratio + dev_wallet.ratio;
-    }
-    if total_ratio != Decimal::one() {
-        return Err(ContractError::WrongRatio {});
-    }
-
-    let total_fee_percent = msg.lp_fee_percent + msg.protocol_fee_percent;
-    let max_fee_percent = Decimal::from_str(MAX_FEE_PERCENT)?;
-    if total_fee_percent > max_fee_percent {
-        return Err(ContractError::FeesTooHigh {
-            max_fee_percent,
-            total_fee_percent,
+pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, ContractError> {
+    let version = get_contract_version(deps.storage)?;
+    if version.contract != CONTRACT_NAME {
+        return Err(ContractError::CannotMigrate {
+            previous_contract: version.contract,
         });
     }
 
-    let fees = Fees {
-        lp_fee_percent: msg.lp_fee_percent,
-        protocol_fee_percent: msg.protocol_fee_percent,
-        dev_wallet_lists: msg.dev_wallet_lists,
-    };
-    FEES.save(deps.storage, &fees)?;
+    if version.version != CONTRACT_VERSION {
+        return Err(ContractError::CannotMigrate {
+            previous_contract: version.version,
+        });
+    }
 
     Ok(Response::default())
 }

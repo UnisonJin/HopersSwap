@@ -564,15 +564,7 @@ fn migrate() {
     assert_eq!(fee.protocol_fee_percent, protocol_fee_percent);
     assert_eq!(fee.lp_fee_percent, lp_fee_percent);
 
-    let migrate_msg = MigrateMsg {
-        owner: Some(owner.to_string()),
-        lp_fee_percent,
-        protocol_fee_percent,
-        dev_wallet_lists: vec![WalletInfo {
-            address: owner.to_string(),
-            ratio: Decimal::one(),
-        }],
-    };
+    let migrate_msg = MigrateMsg {};
 
     router
         .execute(

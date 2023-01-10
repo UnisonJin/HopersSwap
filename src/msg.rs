@@ -86,12 +86,7 @@ pub enum QueryMsg {
     Fee {},
 }
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
-pub struct MigrateMsg {
-    pub owner: Option<String>,
-    pub dev_wallet_lists: Vec<WalletInfo>,
-    pub protocol_fee_percent: Decimal,
-    pub lp_fee_percent: Decimal,
-}
+pub struct MigrateMsg {}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct InfoResponse {

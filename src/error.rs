@@ -75,4 +75,7 @@ pub enum ContractError {
 
     #[error("The output amm provided is invalid")]
     InvalidOutputPool {},
+
+    #[error("Cannot migrate from different contract type: {previous_contract}")]
+    CannotMigrate { previous_contract: String },
 }
