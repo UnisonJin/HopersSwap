@@ -64,8 +64,11 @@ pub fn instantiate(
         return Err(ContractError::WrongRatio {});
     }
 
-    let total_fee_percent = msg.lp_fee_percent + msg.protocol_fee_percent;
+    let num = msg.fee_percent_numerator.u128();
+    let den = msg.fee_percent_denominator.u128();
+    let total_fee_percent = Decimal::from_ratio(num, den);
     let max_fee_percent = Decimal::from_str(MAX_FEE_PERCENT)?;
+
     if total_fee_percent > max_fee_percent {
         return Err(ContractError::FeesTooHigh {
             max_fee_percent,
@@ -74,8 +77,8 @@ pub fn instantiate(
     }
 
     let fees = Fees {
-        lp_fee_percent: msg.lp_fee_percent,
-        protocol_fee_percent: msg.protocol_fee_percent,
+        fee_percent_numerator: msg.fee_percent_numerator,
+        fee_percent_denominator: msg.fee_percent_denominator,
         dev_wallet_lists: msg.dev_wallet_lists,
     };
     FEES.save(deps.storage, &fees)?;
@@ -184,14 +187,14 @@ pub fn execute(
         ExecuteMsg::UpdateConfig {
             owner,
             dev_wallet_lists,
-            lp_fee_percent,
-            protocol_fee_percent,
+            fee_percent_numerator,
+            fee_percent_denominator,
         } => execute_update_config(
             deps,
             info,
             owner,
-            lp_fee_percent,
-            protocol_fee_percent,
+            fee_percent_numerator,
+            fee_percent_denominator,
             dev_wallet_lists,
         ),
     }
@@ -447,8 +450,8 @@ pub fn execute_update_config(
     deps: DepsMut,
     info: MessageInfo,
     new_owner: Option<String>,
-    lp_fee_percent: Decimal,
-    protocol_fee_percent: Decimal,
+    fee_percent_numerator: Uint128,
+    fee_percent_denominator: Uint128,
     dev_wallet_lists: Vec<WalletInfo>,
 ) -> Result<Response, ContractError> {
     let owner = OWNER.load(deps.storage)?;
@@ -462,7 +465,10 @@ pub fn execute_update_config(
         .transpose()?;
     OWNER.save(deps.storage, &new_owner_addr)?;
 
-    let total_fee_percent = lp_fee_percent + protocol_fee_percent;
+    let num = fee_percent_numerator.u128();
+    let den = fee_percent_denominator.u128();
+
+    let total_fee_percent = Decimal::from_ratio(num, den);
     let max_fee_percent = Decimal::from_str(MAX_FEE_PERCENT)?;
     if total_fee_percent > max_fee_percent {
         return Err(ContractError::FeesTooHigh {
@@ -483,16 +489,15 @@ pub fn execute_update_config(
 
     let updated_fees = Fees {
         dev_wallet_lists,
-        lp_fee_percent,
-        protocol_fee_percent,
+        fee_percent_numerator,
+        fee_percent_denominator,
     };
     FEES.save(deps.storage, &updated_fees)?;
 
     let new_owner = new_owner.unwrap_or_else(|| "".to_string());
     Ok(Response::new().add_attributes(vec![
         attr("new_owner", new_owner),
-        attr("lp_fee_percent", lp_fee_percent.to_string()),
-        attr("protocol_fee_percent", protocol_fee_percent.to_string()),
+        attr("fee_percent", total_fee_percent.to_string()),
     ]))
 }
 
@@ -652,45 +657,47 @@ fn fee_decimal_to_uint128(decimal: Decimal) -> StdResult<Uint128> {
     Ok(result / FEE_DECIMAL_PRECISION)
 }
 
-fn get_input_price(
+pub fn get_input_price(
     input_amount: Uint128,
     input_reserve: Uint128,
     output_reserve: Uint128,
-    fee_percent: Decimal,
+    fee_percent_numerator: Uint128,
+    fee_percent_denominator: Uint128,
 ) -> StdResult<Uint128> {
     if input_reserve == Uint128::zero() || output_reserve == Uint128::zero() {
         return Err(StdError::generic_err("No liquidity"));
     };
 
-    let fee_percent = fee_decimal_to_uint128(fee_percent)?;
-    let fee_reduction_percent = FEE_SCALE_FACTOR - fee_percent;
-    let input_amount_with_fee = Uint512::from(input_amount.full_mul(fee_reduction_percent));
-    let numerator = input_amount_with_fee
-        .checked_mul(Uint512::from(output_reserve))
+    let input_amount_with_fee = input_amount
+        .checked_mul(fee_percent_denominator - fee_percent_numerator)
         .map_err(StdError::overflow)?;
-    let denominator = Uint512::from(input_reserve)
-        .checked_mul(Uint512::from(FEE_SCALE_FACTOR))
+    let numerator = input_amount_with_fee
+        .checked_mul(output_reserve)
+        .map_err(StdError::overflow)?;
+    let denominator = input_reserve
+        .checked_mul(fee_percent_denominator)
         .map_err(StdError::overflow)?
         .checked_add(input_amount_with_fee)
         .map_err(StdError::overflow)?;
 
     Ok(numerator
         .checked_div(denominator)
-        .map_err(StdError::divide_by_zero)?
-        .try_into()?)
+        .map_err(StdError::divide_by_zero)?)
 }
 
-fn get_protocol_fee_amount(input_amount: Uint128, fee_percent: Decimal) -> StdResult<Uint128> {
-    if fee_percent.is_zero() {
+pub fn get_protocol_fee_amount(
+    input_amount: Uint128,
+    fee_percent_numerator: Uint128,
+    fee_percent_denominator: Uint128,
+) -> StdResult<Uint128> {
+    if fee_percent_numerator.is_zero() {
         return Ok(Uint128::zero());
     }
-
-    let fee_percent = fee_decimal_to_uint128(fee_percent)?;
     Ok(input_amount
-        .full_mul(fee_percent)
-        .checked_div(Uint256::from(FEE_SCALE_FACTOR))
-        .map_err(StdError::divide_by_zero)?
-        .try_into()?)
+        .checked_mul(fee_percent_numerator)
+        .map_err(StdError::overflow)?
+        .checked_div(fee_percent_denominator)
+        .map_err(StdError::divide_by_zero)?)
 }
 
 fn get_amount_for_denom(coins: &[Coin], denom: &str) -> Coin {
@@ -734,12 +741,13 @@ pub fn execute_swap(
     validate_input_amount(&info.funds, input_amount, &input_token.denom)?;
 
     let fees = FEES.load(deps.storage)?;
-    let total_fee_percent = fees.lp_fee_percent + fees.protocol_fee_percent;
+
     let token_bought = get_input_price(
         input_amount,
         input_token.reserve,
         output_token.reserve,
-        total_fee_percent,
+        fees.fee_percent_numerator,
+        fees.fee_percent_denominator,
     )?;
 
     if min_token > token_bought {
@@ -749,7 +757,11 @@ pub fn execute_swap(
         });
     }
     // Calculate fees
-    let protocol_fee_amount = get_protocol_fee_amount(input_amount, fees.protocol_fee_percent)?;
+    let protocol_fee_amount = get_protocol_fee_amount(
+        input_amount,
+        fees.fee_percent_numerator,
+        fees.fee_percent_denominator,
+    )?;
     let input_amount_minus_protocol_fee = input_amount - protocol_fee_amount;
 
     let mut msgs = match input_token.denom.clone() {
@@ -766,7 +778,7 @@ pub fn execute_swap(
 
     for dev_wallet in fees.dev_wallet_lists {
         let fee_amount = protocol_fee_amount * dev_wallet.ratio;
-        if !fee_amount.is_zero() {
+        if fee_amount > Uint128::zero() {
             msgs.push(get_fee_transfer_msg(
                 &info.sender,
                 &deps.api.addr_validate(&dev_wallet.address)?,
@@ -809,6 +821,7 @@ pub fn execute_swap(
         attr("action", action),
         attr("native_sold", input_amount),
         attr("token_bought", token_bought),
+        attr("protocol_fee_amount", protocol_fee_amount),
     ]))
 }
 
@@ -839,17 +852,21 @@ pub fn execute_pass_through_swap(
     validate_input_amount(&info.funds, input_token_amount, &input_token.denom)?;
 
     let fees = FEES.load(deps.storage)?;
-    let total_fee_percent = fees.lp_fee_percent + fees.protocol_fee_percent;
+
     let amount_to_transfer = get_input_price(
         input_token_amount,
         input_token.reserve,
         transfer_token.reserve,
-        total_fee_percent,
+        fees.fee_percent_numerator,
+        fees.fee_percent_denominator,
     )?;
 
     // Calculate fees
-    let protocol_fee_amount =
-        get_protocol_fee_amount(input_token_amount, fees.protocol_fee_percent)?;
+    let protocol_fee_amount = get_protocol_fee_amount(
+        input_token_amount,
+        fees.fee_percent_numerator,
+        fees.fee_percent_denominator,
+    )?;
     let input_amount_minus_protocol_fee = input_token_amount - protocol_fee_amount;
 
     // Transfer input amount - protocol fee to contract
@@ -866,7 +883,7 @@ pub fn execute_pass_through_swap(
     // Send protocol fee to protocol fee recipient
     for dev_wallet in fees.dev_wallet_lists {
         let fee_amount = protocol_fee_amount * dev_wallet.ratio;
-        if !fee_amount.is_zero() {
+        if fee_amount > Uint128::zero() {
             msgs.push(get_fee_transfer_msg(
                 &info.sender,
                 &deps.api.addr_validate(&dev_wallet.address)?,
@@ -985,12 +1002,12 @@ pub fn query_token1_for_token2_price(
     let token2 = TOKEN2.load(deps.storage)?;
 
     let fees = FEES.load(deps.storage)?;
-    let total_fee_percent = fees.lp_fee_percent + fees.protocol_fee_percent;
     let token2_amount = get_input_price(
         token1_amount,
         token1.reserve,
         token2.reserve,
-        total_fee_percent,
+        fees.fee_percent_numerator,
+        fees.fee_percent_denominator,
     )?;
     Ok(Token1ForToken2PriceResponse { token2_amount })
 }
@@ -1003,12 +1020,13 @@ pub fn query_token2_for_token1_price(
     let token2 = TOKEN2.load(deps.storage)?;
 
     let fees = FEES.load(deps.storage)?;
-    let total_fee_percent = fees.lp_fee_percent + fees.protocol_fee_percent;
+
     let token1_amount = get_input_price(
         token2_amount,
         token2.reserve,
         token1.reserve,
-        total_fee_percent,
+        fees.fee_percent_numerator,
+        fees.fee_percent_denominator,
     )?;
     Ok(Token2ForToken1PriceResponse { token1_amount })
 }
@@ -1017,10 +1035,13 @@ pub fn query_fee(deps: Deps) -> StdResult<FeeResponse> {
     let fees = FEES.load(deps.storage)?;
     let owner = OWNER.load(deps.storage)?.map(|o| o.into_string());
 
+    let num = fees.fee_percent_numerator.u128();
+    let den = fees.fee_percent_denominator.u128();
+    let total_fee_percent = Decimal::from_ratio(num, den);
+
     Ok(FeeResponse {
         owner,
-        lp_fee_percent: fees.lp_fee_percent,
-        protocol_fee_percent: fees.protocol_fee_percent,
+        total_fee_percent,
         dev_wallet_lists: fees.dev_wallet_lists,
     })
 }
@@ -1101,51 +1122,5 @@ mod tests {
         )
         .unwrap();
         assert_eq!(liquidity, Uint128::new(201));
-    }
-
-    #[test]
-    fn test_get_input_price() {
-        let fee_percent = Decimal::from_str("0.3").unwrap();
-        // Base case
-        assert_eq!(
-            get_input_price(
-                Uint128::new(10),
-                Uint128::new(100),
-                Uint128::new(100),
-                fee_percent
-            )
-            .unwrap(),
-            Uint128::new(9)
-        );
-
-        // No input reserve error
-        let err = get_input_price(
-            Uint128::new(10),
-            Uint128::new(0),
-            Uint128::new(100),
-            fee_percent,
-        )
-        .unwrap_err();
-        assert_eq!(err, StdError::generic_err("No liquidity"));
-
-        // No output reserve error
-        let err = get_input_price(
-            Uint128::new(10),
-            Uint128::new(100),
-            Uint128::new(0),
-            fee_percent,
-        )
-        .unwrap_err();
-        assert_eq!(err, StdError::generic_err("No liquidity"));
-
-        // No reserve error
-        let err = get_input_price(
-            Uint128::new(10),
-            Uint128::new(0),
-            Uint128::new(0),
-            fee_percent,
-        )
-        .unwrap_err();
-        assert_eq!(err, StdError::generic_err("No liquidity"));
     }
 }

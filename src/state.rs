@@ -23,8 +23,8 @@ pub const OWNER: Item<Option<Addr>> = Item::new("owner");
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
 pub struct Fees {
     pub dev_wallet_lists: Vec<WalletInfo>,
-    pub protocol_fee_percent: Decimal,
-    pub lp_fee_percent: Decimal,
+    pub fee_percent_numerator: Uint128,
+    pub fee_percent_denominator: Uint128,
 }
 
 pub const FEES: Item<Fees> = Item::new("fees");

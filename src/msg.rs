@@ -12,8 +12,8 @@ pub struct InstantiateMsg {
     pub lp_token_code_id: u64,
     pub owner: Option<String>,
     // NOTE: Fees percents are out of 100 e.g., 1 = 1%
-    pub protocol_fee_percent: Decimal,
-    pub lp_fee_percent: Decimal,
+    pub fee_percent_numerator: Uint128,
+    pub fee_percent_denominator: Uint128,
     pub lp_token_name: String,
     pub lp_token_symbol: String,
     pub dev_wallet_lists: Vec<WalletInfo>,
@@ -63,8 +63,8 @@ pub enum ExecuteMsg {
     },
     UpdateConfig {
         owner: Option<String>,
-        lp_fee_percent: Decimal,
-        protocol_fee_percent: Decimal,
+        fee_percent_numerator: Uint128,
+        fee_percent_denominator: Uint128,
         dev_wallet_lists: Vec<WalletInfo>,
     },
 }
@@ -101,8 +101,7 @@ pub struct InfoResponse {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct FeeResponse {
     pub owner: Option<String>,
-    pub lp_fee_percent: Decimal,
-    pub protocol_fee_percent: Decimal,
+    pub total_fee_percent: Decimal,
     pub dev_wallet_lists: Vec<WalletInfo>,
 }
 
