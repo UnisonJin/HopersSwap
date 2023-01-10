@@ -2,10 +2,15 @@
 
 use std::borrow::BorrowMut;
 
-use cosmwasm_std::{coins, to_binary, Addr, Coin, CosmosMsg, Decimal, Empty, Uint128, WasmMsg};
+use cosmwasm_std::{
+    coins,
+    testing::{mock_dependencies, mock_env, mock_info},
+    to_binary, Addr, Coin, CosmosMsg, Decimal, DepsMut, Empty, Env, Uint128, WasmMsg,
+};
 use cw0::Expiration;
 
 use crate::{
+    contract::{execute, get_input_price, get_protocol_fee_amount, instantiate},
     error::ContractError,
     msg::{MigrateMsg, WalletInfo},
 };
@@ -58,8 +63,8 @@ fn create_amm(
     owner: &Addr,
     token1_denom: Denom,
     token2_denom: Denom,
-    lp_fee_percent: Decimal,
-    protocol_fee_percent: Decimal,
+    fee_percent_numerator: Decimal,
+    fee_percent_denominator: Decimal,
     dev_wallet_lists: Vec<WalletInfo>,
 ) -> Addr {
     // set up amm contract
@@ -70,8 +75,8 @@ fn create_amm(
         token2_denom,
         lp_token_code_id: cw20_id,
         owner: Some(owner.to_string()),
-        lp_fee_percent,
-        protocol_fee_percent,
+        fee_percent_numerator: Uint128::new(20),
+        fee_percent_denominator: Uint128::new(100),
         dev_wallet_lists,
         lp_token_name: "lp_token".to_string(),
         lp_token_symbol: "lp_symbol".to_string(),
@@ -136,15 +141,15 @@ fn test_instantiate() {
         Uint128::new(5000),
     );
 
-    let lp_fee_percent = Decimal::from_str("0.3").unwrap();
-    let protocol_fee_percent = Decimal::zero();
+    let fee_percent_numerator = Decimal::from_str("0.3").unwrap();
+    let fee_percent_denominator = Decimal::zero();
     let amm_addr = create_amm(
         &mut router,
         &owner,
         Denom::Native(NATIVE_TOKEN_DENOM.into()),
         Denom::Cw20(cw20_token.addr()),
-        lp_fee_percent,
-        protocol_fee_percent,
+        fee_percent_numerator,
+        fee_percent_denominator,
         vec![WalletInfo {
             address: owner.to_string(),
             ratio: Decimal::one(),
@@ -157,13 +162,12 @@ fn test_instantiate() {
     assert_eq!(info.lp_token_address, "Contract #2".to_string());
 
     let fee = get_fee(&router, &amm_addr);
-    assert_eq!(fee.lp_fee_percent, lp_fee_percent);
-    assert_eq!(fee.protocol_fee_percent, protocol_fee_percent);
+
     assert_eq!(fee.owner.unwrap(), owner.to_string());
 
     // Test instantiation with invalid fee amount
-    let lp_fee_percent = Decimal::from_str("1.01").unwrap();
-    let protocol_fee_percent = Decimal::zero();
+    let fee_percent_numerator = Decimal::from_str("1.01").unwrap();
+    let fee_percent_denominator = Decimal::zero();
     let cw20_id = router.store_code(contract_cw20());
     let amm_id = router.store_code(contract_amm());
     let msg = InstantiateMsg {
@@ -171,8 +175,8 @@ fn test_instantiate() {
         token2_denom: Denom::Cw20(cw20_token.addr()),
         lp_token_code_id: cw20_id,
         owner: Some(owner.to_string()),
-        lp_fee_percent,
-        protocol_fee_percent,
+        fee_percent_numerator: Uint128::new(20),
+        fee_percent_denominator: Uint128::new(100),
         dev_wallet_lists: vec![WalletInfo {
             address: owner.to_string(),
             ratio: Decimal::one(),
@@ -215,15 +219,15 @@ fn amm_add_and_remove_liquidity() {
         Uint128::new(5000),
     );
 
-    let lp_fee_percent = Decimal::from_str("0.3").unwrap();
-    let protocol_fee_percent = Decimal::zero();
+    let fee_percent_numerator = Decimal::from_str("0.3").unwrap();
+    let fee_percent_denominator = Decimal::zero();
     let amm_addr = create_amm(
         &mut router,
         &owner,
         Denom::Native(NATIVE_TOKEN_DENOM.into()),
         Denom::Cw20(cw20_token.addr()),
-        lp_fee_percent,
-        protocol_fee_percent,
+        fee_percent_numerator,
+        fee_percent_denominator,
         vec![WalletInfo {
             address: owner.to_string(),
             ratio: Decimal::one(),
@@ -531,8 +535,8 @@ fn migrate() {
 
     let amm_id = router.store_code(contract_amm());
     let lp_token_id = router.store_code(contract_cw20());
-    let lp_fee_percent = Decimal::from_str("0.3").unwrap();
-    let protocol_fee_percent = Decimal::zero();
+    let fee_percent_numerator = Decimal::from_str("0.3").unwrap();
+    let fee_percent_denominator = Decimal::zero();
     let owner = Addr::unchecked("owner");
 
     let msg = InstantiateMsg {
@@ -540,8 +544,8 @@ fn migrate() {
         token2_denom: Denom::Native(IBC_TOKEN_DENOM.into()),
         lp_token_code_id: lp_token_id,
         owner: Some(owner.to_string()),
-        lp_fee_percent,
-        protocol_fee_percent,
+        fee_percent_numerator: Uint128::new(20),
+        fee_percent_denominator: Uint128::new(100),
         dev_wallet_lists: vec![WalletInfo {
             address: owner.to_string(),
             ratio: Decimal::one(),
@@ -561,8 +565,6 @@ fn migrate() {
         .unwrap();
 
     let fee = get_fee(&router, &amm_addr);
-    assert_eq!(fee.protocol_fee_percent, protocol_fee_percent);
-    assert_eq!(fee.lp_fee_percent, lp_fee_percent);
 
     let migrate_msg = MigrateMsg {};
 
@@ -578,8 +580,6 @@ fn migrate() {
         .unwrap();
 
     let fee = get_fee(&router, &amm_addr);
-    assert_eq!(fee.protocol_fee_percent, protocol_fee_percent);
-    assert_eq!(fee.lp_fee_percent, lp_fee_percent);
     assert_eq!(fee.owner, Some(owner.to_string()));
 }
 
@@ -603,19 +603,25 @@ fn swap_tokens_happy_path() {
         Uint128::new(5000),
     );
 
-    let lp_fee_percent = Decimal::from_str("0.3").unwrap();
-    let protocol_fee_percent = Decimal::zero();
+    let fee_percent_numerator = Decimal::from_str("0.3").unwrap();
+    let fee_percent_denominator = Decimal::zero();
     let amm_addr = create_amm(
         &mut router,
         &owner,
         Denom::Native(NATIVE_TOKEN_DENOM.into()),
         Denom::Cw20(cw20_token.addr()),
-        lp_fee_percent,
-        protocol_fee_percent,
-        vec![WalletInfo {
-            address: owner.to_string(),
-            ratio: Decimal::one(),
-        }],
+        fee_percent_numerator,
+        fee_percent_denominator,
+        vec![
+            WalletInfo {
+                address: owner.to_string(),
+                ratio: Decimal::from_ratio(10 as u128, 100 as u128),
+            },
+            WalletInfo {
+                address: owner.to_string(),
+                ratio: Decimal::from_ratio(90 as u128, 100 as u128),
+            },
+        ],
     );
 
     assert_ne!(cw20_token.addr(), amm_addr);
@@ -668,7 +674,7 @@ fn swap_tokens_happy_path() {
         min_output: Uint128::new(9),
         expiration: None,
     };
-    let _res = router
+    let res = router
         .execute_contract(
             buyer.clone(),
             amm_addr.clone(),
@@ -680,6 +686,7 @@ fn swap_tokens_happy_path() {
         )
         .unwrap();
 
+    // println!("res messages length {:?}", res)?
     let info = get_info(&router, &amm_addr);
     assert_eq!(info.token1_reserve, Uint128::new(110));
     assert_eq!(info.token2_reserve, Uint128::new(91));
@@ -813,15 +820,15 @@ fn swap_with_fee_split() {
         Uint128::new(5_000_000_000),
     );
 
-    let lp_fee_percent = Decimal::from_str("0.2").unwrap();
-    let protocol_fee_percent = Decimal::from_str("0.1").unwrap();
+    let fee_percent_numerator = Decimal::from_str("0.2").unwrap();
+    let fee_percent_denominator = Decimal::from_str("0.1").unwrap();
     let amm_addr = create_amm(
         &mut router,
         &owner,
         Denom::Native(NATIVE_TOKEN_DENOM.to_string()),
         Denom::Cw20(cw20_token.addr()),
-        lp_fee_percent,
-        protocol_fee_percent,
+        fee_percent_numerator,
+        fee_percent_denominator,
         vec![WalletInfo {
             address: owner.to_string(),
             ratio: Decimal::one(),
@@ -1040,52 +1047,50 @@ fn update_config() {
         Uint128::new(5000),
     );
 
-    let lp_fee_percent = Decimal::from_str("0.3").unwrap();
-    let protocol_fee_percent = Decimal::zero();
+    let fee_percent_numerator = Decimal::from_str("0.3").unwrap();
+    let fee_percent_denominator = Decimal::zero();
     let amm_addr = create_amm(
         &mut router,
         &owner,
         Denom::Native(NATIVE_TOKEN_DENOM.to_string()),
         Denom::Cw20(cw20_token.addr()),
-        lp_fee_percent,
-        protocol_fee_percent,
+        fee_percent_numerator,
+        fee_percent_denominator,
         vec![WalletInfo {
             address: owner.to_string(),
             ratio: Decimal::one(),
         }],
     );
 
-    let lp_fee_percent = Decimal::from_str("0.15").unwrap();
-    let protocol_fee_percent = Decimal::from_str("0.15").unwrap();
+    let fee_percent_numerator = Decimal::from_str("0.15").unwrap();
+    let fee_percent_denominator = Decimal::from_str("0.15").unwrap();
     let msg = ExecuteMsg::UpdateConfig {
         owner: Some(owner.to_string()),
         dev_wallet_lists: vec![WalletInfo {
             address: owner.to_string(),
             ratio: Decimal::one(),
         }],
-        lp_fee_percent,
-        protocol_fee_percent,
+        fee_percent_numerator: Uint128::new(20),
+        fee_percent_denominator: Uint128::new(100),
     };
     let _res = router
         .execute_contract(owner.clone(), amm_addr.clone(), &msg, &[])
         .unwrap();
 
     let fee = get_fee(&router, &amm_addr);
-    assert_eq!(fee.protocol_fee_percent, protocol_fee_percent);
-    assert_eq!(fee.lp_fee_percent, lp_fee_percent);
     assert_eq!(fee.owner.unwrap(), owner.to_string());
 
     // Try updating config with fee values that are too high
-    let lp_fee_percent = Decimal::from_str("1.01").unwrap();
-    let protocol_fee_percent = Decimal::zero();
+    let fee_percent_numerator = Decimal::from_str("1.01").unwrap();
+    let fee_percent_denominator = Decimal::zero();
     let msg = ExecuteMsg::UpdateConfig {
         owner: Some(owner.to_string()),
         dev_wallet_lists: vec![WalletInfo {
             address: owner.to_string(),
             ratio: Decimal::one(),
         }],
-        lp_fee_percent,
-        protocol_fee_percent,
+        fee_percent_numerator: Uint128::new(20),
+        fee_percent_denominator: Uint128::new(100),
     };
     let err = router
         .execute_contract(owner.clone(), amm_addr.clone(), &msg, &[])
@@ -1101,16 +1106,16 @@ fn update_config() {
     );
 
     // Try updating config with invalid owner, show throw unauthoritzed error
-    let lp_fee_percent = Decimal::from_str("0.21").unwrap();
-    let protocol_fee_percent = Decimal::from_str("0.09").unwrap();
+    let fee_percent_numerator = Decimal::from_str("0.21").unwrap();
+    let fee_percent_denominator = Decimal::from_str("0.09").unwrap();
     let msg = ExecuteMsg::UpdateConfig {
         owner: Some(owner.to_string()),
         dev_wallet_lists: vec![WalletInfo {
             address: owner.to_string(),
             ratio: Decimal::one(),
         }],
-        lp_fee_percent,
-        protocol_fee_percent,
+        fee_percent_numerator: Uint128::new(20),
+        fee_percent_denominator: Uint128::new(100),
     };
     let err = router
         .execute_contract(
@@ -1131,16 +1136,14 @@ fn update_config() {
             address: owner.to_string(),
             ratio: Decimal::one(),
         }],
-        lp_fee_percent,
-        protocol_fee_percent,
+        fee_percent_numerator: Uint128::new(20),
+        fee_percent_denominator: Uint128::new(100),
     };
     let _res = router
         .execute_contract(owner.clone(), amm_addr.clone(), &msg, &[])
         .unwrap();
 
     let fee = get_fee(&router, &amm_addr);
-    assert_eq!(fee.protocol_fee_percent, protocol_fee_percent);
-    assert_eq!(fee.lp_fee_percent, lp_fee_percent);
     assert_eq!(fee.owner.unwrap(), "new_owner".to_string());
 }
 
@@ -1168,16 +1171,16 @@ fn swap_native_to_native_tokens_happy_path() {
 
     let amm_id = router.store_code(contract_amm());
     let lp_token_id = router.store_code(contract_cw20());
-    let lp_fee_percent = Decimal::from_str("0.3").unwrap();
-    let protocol_fee_percent = Decimal::zero();
+    let fee_percent_numerator = Decimal::from_str("0.3").unwrap();
+    let fee_percent_denominator = Decimal::zero();
 
     let msg = InstantiateMsg {
         token1_denom: Denom::Native(NATIVE_TOKEN_DENOM.into()),
         token2_denom: Denom::Native(IBC_TOKEN_DENOM.into()),
         lp_token_code_id: lp_token_id,
         owner: Some(owner.to_string()),
-        lp_fee_percent,
-        protocol_fee_percent,
+        fee_percent_numerator: Uint128::new(20),
+        fee_percent_denominator: Uint128::new(100),
         dev_wallet_lists: vec![WalletInfo {
             address: owner.to_string(),
             ratio: Decimal::one(),
@@ -1377,15 +1380,15 @@ fn token_to_token_swap_with_fee_split() {
         Uint128::new(5_000_000_000),
     );
 
-    let lp_fee_percent = Decimal::from_str("0.2").unwrap();
-    let protocol_fee_percent = Decimal::from_str("0.1").unwrap();
+    let fee_percent_numerator = Decimal::from_str("0.2").unwrap();
+    let fee_percent_denominator = Decimal::from_str("0.1").unwrap();
     let amm1 = create_amm(
         &mut router,
         &owner,
         Denom::Native(NATIVE_TOKEN_DENOM.to_string()),
         Denom::Cw20(token1.addr()),
-        lp_fee_percent,
-        protocol_fee_percent,
+        fee_percent_numerator,
+        fee_percent_denominator,
         vec![WalletInfo {
             address: owner.to_string(),
             ratio: Decimal::one(),
@@ -1396,8 +1399,8 @@ fn token_to_token_swap_with_fee_split() {
         &owner,
         Denom::Native(NATIVE_TOKEN_DENOM.to_string()),
         Denom::Cw20(token2.addr()),
-        lp_fee_percent,
-        protocol_fee_percent,
+        fee_percent_numerator,
+        fee_percent_denominator,
         vec![WalletInfo {
             address: owner.to_string(),
             ratio: Decimal::one(),
@@ -1590,15 +1593,15 @@ fn test_pass_through_swap() {
         Uint128::new(5000),
     );
 
-    let lp_fee_percent = Decimal::from_str("0.3").unwrap();
-    let protocol_fee_percent = Decimal::zero();
+    let fee_percent_numerator = Decimal::from_str("0.3").unwrap();
+    let fee_percent_denominator = Decimal::zero();
     let amm1 = create_amm(
         &mut router,
         &owner,
         Denom::Native(NATIVE_TOKEN_DENOM.to_string()),
         Denom::Cw20(token1.addr()),
-        lp_fee_percent,
-        protocol_fee_percent,
+        fee_percent_numerator,
+        fee_percent_denominator,
         vec![WalletInfo {
             address: owner.to_string(),
             ratio: Decimal::one(),
@@ -1609,8 +1612,8 @@ fn test_pass_through_swap() {
         &owner,
         Denom::Native(NATIVE_TOKEN_DENOM.to_string()),
         Denom::Cw20(token2.addr()),
-        lp_fee_percent,
-        protocol_fee_percent,
+        fee_percent_numerator,
+        fee_percent_denominator,
         vec![WalletInfo {
             address: owner.to_string(),
             ratio: Decimal::one(),
@@ -1791,15 +1794,15 @@ fn test_pass_through_swap_alternative_positions() {
         Uint128::new(5000),
     );
 
-    let lp_fee_percent = Decimal::from_str("0.3").unwrap();
-    let protocol_fee_percent = Decimal::zero();
+    let fee_percent_numerator = Decimal::from_str("0.3").unwrap();
+    let fee_percent_denominator = Decimal::zero();
     let amm1 = create_amm(
         &mut router,
         &owner,
         Denom::Native(NATIVE_TOKEN_DENOM.to_string()),
         Denom::Cw20(token1.addr()),
-        lp_fee_percent,
-        protocol_fee_percent,
+        fee_percent_numerator,
+        fee_percent_denominator,
         vec![WalletInfo {
             address: owner.to_string(),
             ratio: Decimal::one(),
@@ -1810,8 +1813,8 @@ fn test_pass_through_swap_alternative_positions() {
         &owner,
         Denom::Cw20(token2.addr()),
         Denom::Native(NATIVE_TOKEN_DENOM.to_string()),
-        lp_fee_percent,
-        protocol_fee_percent,
+        fee_percent_numerator,
+        fee_percent_denominator,
         vec![WalletInfo {
             address: owner.to_string(),
             ratio: Decimal::one(),
@@ -1958,8 +1961,8 @@ fn test_pass_through_swap_alternative_positions() {
         &owner,
         Denom::Native(NATIVE_TOKEN_DENOM.to_string()),
         Denom::Native(WRONG_DENOM.to_string()),
-        lp_fee_percent,
-        protocol_fee_percent,
+        fee_percent_numerator,
+        fee_percent_denominator,
         vec![WalletInfo {
             address: owner.to_string(),
             ratio: Decimal::one(),
@@ -2007,4 +2010,21 @@ fn test_pass_through_swap_alternative_positions() {
         .downcast()
         .unwrap();
     assert_eq!(ContractError::InvalidOutputPool {}, err)
+}
+
+#[test]
+fn test_swap() {
+    let amount = get_input_price(
+        Uint128::new(1000),
+        Uint128::new(10000),
+        Uint128::new(20000),
+        Uint128::new(5),
+        Uint128::new(1000),
+    )
+    .unwrap();
+    println!("{:?}", amount);
+
+    let fee_amount =
+        get_protocol_fee_amount(Uint128::new(1000), Uint128::new(5), Uint128::new(1000)).unwrap();
+    println!("fee_amount {:?}", fee_amount)
 }
