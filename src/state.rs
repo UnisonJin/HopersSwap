@@ -8,6 +8,7 @@ use cw_storage_plus::Item;
 use crate::msg::WalletInfo;
 
 pub const LP_TOKEN: Item<Addr> = Item::new("lp_token");
+pub const BURN_FEE_INFO: Item<Uint128> = Item::new("config_burn_info");
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct Token {

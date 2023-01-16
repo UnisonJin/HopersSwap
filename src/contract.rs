@@ -16,7 +16,7 @@ use crate::msg::{
     ExecuteMsg, FeeResponse, InfoResponse, InstantiateMsg, MigrateMsg, QueryMsg,
     Token1ForToken2PriceResponse, Token2ForToken1PriceResponse, TokenSelect, WalletInfo,
 };
-use crate::state::{Fees, Token, FEES, LP_TOKEN, OWNER, TOKEN1, TOKEN2};
+use crate::state::{Fees, Token, BURN_FEE_INFO, FEES, LP_TOKEN, OWNER, TOKEN1, TOKEN2};
 
 // Version info for migration info
 pub const CONTRACT_NAME: &str = "crates.io:wasmswap";
@@ -82,6 +82,8 @@ pub fn instantiate(
         dev_wallet_lists: msg.dev_wallet_lists,
     };
     FEES.save(deps.storage, &fees)?;
+
+    BURN_FEE_INFO.save(deps.storage, &msg.burn_fee_percent_numerator)?;
 
     let instantiate_lp_token_msg = WasmMsg::Instantiate {
         code_id: msg.lp_token_code_id,
@@ -188,12 +190,14 @@ pub fn execute(
             owner,
             dev_wallet_lists,
             fee_percent_numerator,
+            burn_fee_percent_numerator,
             fee_percent_denominator,
         } => execute_update_config(
             deps,
             info,
             owner,
             fee_percent_numerator,
+            burn_fee_percent_numerator,
             fee_percent_denominator,
             dev_wallet_lists,
         ),
@@ -426,6 +430,39 @@ fn get_cw20_transfer_from_msg(
     Ok(cw20_transfer_cosmos_msg)
 }
 
+fn get_cw20_burn_from_msg(
+    owner: &Addr,
+    token_addr: &Addr,
+    token_amount: Uint128,
+) -> StdResult<CosmosMsg> {
+    // create transfer cw20 msg
+    let transfer_cw20_msg = Cw20ExecuteMsg::BurnFrom {
+        owner: owner.into(),
+        amount: token_amount,
+    };
+    let exec_cw20_transfer = WasmMsg::Execute {
+        contract_addr: token_addr.into(),
+        msg: to_binary(&transfer_cw20_msg)?,
+        funds: vec![],
+    };
+    let cw20_transfer_cosmos_msg: CosmosMsg = exec_cw20_transfer.into();
+    Ok(cw20_transfer_cosmos_msg)
+}
+
+fn get_cw20_burn_msg(token_addr: &Addr, token_amount: Uint128) -> StdResult<CosmosMsg> {
+    // create transfer cw20 msg
+    let transfer_cw20_msg = Cw20ExecuteMsg::Burn {
+        amount: token_amount,
+    };
+    let exec_cw20_transfer = WasmMsg::Execute {
+        contract_addr: token_addr.into(),
+        msg: to_binary(&transfer_cw20_msg)?,
+        funds: vec![],
+    };
+    let cw20_transfer_cosmos_msg: CosmosMsg = exec_cw20_transfer.into();
+    Ok(cw20_transfer_cosmos_msg)
+}
+
 fn get_cw20_increase_allowance_msg(
     token_addr: &Addr,
     spender: &Addr,
@@ -451,6 +488,7 @@ pub fn execute_update_config(
     info: MessageInfo,
     new_owner: Option<String>,
     fee_percent_numerator: Uint128,
+    burn_fee_percent_numerator: Uint128,
     fee_percent_denominator: Uint128,
     dev_wallet_lists: Vec<WalletInfo>,
 ) -> Result<Response, ContractError> {
@@ -493,6 +531,8 @@ pub fn execute_update_config(
         fee_percent_denominator,
     };
     FEES.save(deps.storage, &updated_fees)?;
+
+    BURN_FEE_INFO.save(deps.storage, &burn_fee_percent_numerator)?;
 
     let new_owner = new_owner.unwrap_or_else(|| "".to_string());
     Ok(Response::new().add_attributes(vec![
@@ -663,14 +703,29 @@ pub fn get_input_price(
     output_reserve: Uint128,
     fee_percent_numerator: Uint128,
     fee_percent_denominator: Uint128,
+    burn_fee_percent_numerator: Uint128,
+    token_type: TokenSelect,
 ) -> StdResult<Uint128> {
     if input_reserve == Uint128::zero() || output_reserve == Uint128::zero() {
         return Err(StdError::generic_err("No liquidity"));
     };
 
-    let input_amount_with_fee = input_amount
-        .checked_mul(fee_percent_denominator - fee_percent_numerator)
-        .map_err(StdError::overflow)?;
+    let input_amount_with_fee: Uint128;
+    match token_type {
+        TokenSelect::Token1 => {
+            input_amount_with_fee = input_amount
+                .checked_mul(
+                    fee_percent_denominator - fee_percent_numerator - burn_fee_percent_numerator,
+                )
+                .map_err(StdError::overflow)?;
+        }
+        TokenSelect::Token2 => {
+            input_amount_with_fee = input_amount
+                .checked_mul(fee_percent_denominator - fee_percent_numerator)
+                .map_err(StdError::overflow)?;
+        }
+    }
+
     let numerator = input_amount_with_fee
         .checked_mul(output_reserve)
         .map_err(StdError::overflow)?;
@@ -737,18 +792,76 @@ pub fn execute_swap(
     };
     let output_token = output_token_item.load(deps.storage)?;
 
+    let main_token_denom = match input_token_enum {
+        TokenSelect::Token1 => input_token.denom.clone(),
+        TokenSelect::Token2 => output_token.denom.clone(),
+    };
+
     // validate input_amount if native input token
     validate_input_amount(&info.funds, input_amount, &input_token.denom)?;
 
     let fees = FEES.load(deps.storage)?;
+    let burn_fee_percent_numerator = BURN_FEE_INFO.load(deps.storage)?;
 
-    let token_bought = get_input_price(
+    let mut token_bought: Uint128;
+    let burn_fee_amount: Uint128;
+
+    // Calculate fees
+    let protocol_fee_amount = get_protocol_fee_amount(
         input_amount,
-        input_token.reserve,
-        output_token.reserve,
         fees.fee_percent_numerator,
         fees.fee_percent_denominator,
     )?;
+    let input_amount_minus_protocol_burn_fee: Uint128;
+
+    //Token1 is always hopers token so if the input is Token1, we should burn some percent of input token
+    //else we should burn after swap
+    match input_token_enum {
+        TokenSelect::Token1 => {
+            token_bought = get_input_price(
+                input_amount,
+                input_token.reserve,
+                output_token.reserve,
+                fees.fee_percent_numerator,
+                fees.fee_percent_denominator,
+                burn_fee_percent_numerator,
+                TokenSelect::Token1,
+            )?;
+            // burn fee  = 2/1000 * input_amount(the input token in our main token hopers)
+            // out_put token amount would not get affected
+            burn_fee_amount = get_protocol_fee_amount(
+                input_amount,
+                burn_fee_percent_numerator,
+                fees.fee_percent_denominator,
+            )?;
+            input_amount_minus_protocol_burn_fee =
+                input_amount - protocol_fee_amount - burn_fee_amount;
+        }
+        TokenSelect::Token2 => {
+            token_bought = get_input_price(
+                input_amount,
+                input_token.reserve,
+                output_token.reserve,
+                fees.fee_percent_numerator,
+                fees.fee_percent_denominator,
+                burn_fee_percent_numerator,
+                TokenSelect::Token2,
+            )?;
+            // we get burn_fee_amount after swap the other token as hopers
+            burn_fee_amount = get_protocol_fee_amount(
+                token_bought,
+                burn_fee_percent_numerator,
+                fees.fee_percent_denominator,
+            )?;
+            // token_bought amount must be decreased by burn_fee_percent
+            token_bought = get_protocol_fee_amount(
+                token_bought,
+                fees.fee_percent_denominator - burn_fee_percent_numerator,
+                fees.fee_percent_denominator,
+            )?;
+            input_amount_minus_protocol_burn_fee = input_amount - protocol_fee_amount;
+        }
+    };
 
     if min_token > token_bought {
         return Err(ContractError::SwapMinError {
@@ -756,22 +869,27 @@ pub fn execute_swap(
             available: token_bought,
         });
     }
-    // Calculate fees
-    let protocol_fee_amount = get_protocol_fee_amount(
-        input_amount,
-        fees.fee_percent_numerator,
-        fees.fee_percent_denominator,
-    )?;
-    let input_amount_minus_protocol_fee = input_amount - protocol_fee_amount;
 
     let mut msgs = match input_token.denom.clone() {
         Denom::Cw20(addr) => vec![get_cw20_transfer_from_msg(
             &info.sender,
             &_env.contract.address,
             &addr,
-            input_amount_minus_protocol_fee,
+            input_amount_minus_protocol_burn_fee,
         )?],
         Denom::Native(_) => vec![],
+    };
+
+    match main_token_denom {
+        Denom::Cw20(addr) => match input_token_enum {
+            TokenSelect::Token1 => msgs.push(get_cw20_burn_from_msg(
+                &info.sender,
+                &addr,
+                burn_fee_amount,
+            )?),
+            TokenSelect::Token2 => msgs.push(get_cw20_burn_msg(&addr, burn_fee_amount)?),
+        },
+        Denom::Native(_) => {}
     };
 
     // Send protocol fee to protocol fee recipient
@@ -800,7 +918,7 @@ pub fn execute_swap(
         |mut input_token| -> Result<_, ContractError> {
             input_token.reserve = input_token
                 .reserve
-                .checked_add(input_amount_minus_protocol_fee)
+                .checked_add(input_amount_minus_protocol_burn_fee)
                 .map_err(StdError::overflow)?;
             Ok(input_token)
         },
@@ -817,11 +935,18 @@ pub fn execute_swap(
         },
     )?;
 
+    let input_denom: String;
+    match input_token_enum {
+        TokenSelect::Token1 => input_denom = "Token1".to_string(),
+        TokenSelect::Token2 => input_denom = "Token2".to_string(),
+    }
+
     Ok(Response::new().add_messages(msgs).add_attributes(vec![
         attr("action", action),
         attr("native_sold", input_amount),
         attr("token_bought", token_bought),
         attr("protocol_fee_amount", protocol_fee_amount),
+        attr("input_token", input_denom),
     ]))
 }
 
@@ -836,6 +961,7 @@ pub fn execute_pass_through_swap(
     output_min_token: Uint128,
     expiration: Option<Expiration>,
 ) -> Result<Response, ContractError> {
+    let action = "pass_swap".to_string();
     check_expiration(&expiration, &_env.block)?;
 
     let input_token_state = match input_token_enum {
@@ -849,17 +975,18 @@ pub fn execute_pass_through_swap(
     };
     let transfer_token = transfer_token_state.load(deps.storage)?;
 
+    let main_token_denom = match input_token_enum {
+        TokenSelect::Token1 => input_token.denom.clone(),
+        TokenSelect::Token2 => transfer_token.denom.clone(),
+    };
+
     validate_input_amount(&info.funds, input_token_amount, &input_token.denom)?;
 
     let fees = FEES.load(deps.storage)?;
+    let burn_fee_percent_numerator = BURN_FEE_INFO.load(deps.storage)?;
 
-    let amount_to_transfer = get_input_price(
-        input_token_amount,
-        input_token.reserve,
-        transfer_token.reserve,
-        fees.fee_percent_numerator,
-        fees.fee_percent_denominator,
-    )?;
+    let mut amount_to_transfer: Uint128;
+    let burn_fee_amount: Uint128;
 
     // Calculate fees
     let protocol_fee_amount = get_protocol_fee_amount(
@@ -867,7 +994,54 @@ pub fn execute_pass_through_swap(
         fees.fee_percent_numerator,
         fees.fee_percent_denominator,
     )?;
-    let input_amount_minus_protocol_fee = input_token_amount - protocol_fee_amount;
+    let input_amount_minus_protocol_burn_fee: Uint128;
+
+    match input_token_enum {
+        TokenSelect::Token1 => {
+            amount_to_transfer = get_input_price(
+                input_token_amount,
+                input_token.reserve,
+                transfer_token.reserve,
+                fees.fee_percent_numerator,
+                fees.fee_percent_denominator,
+                burn_fee_percent_numerator,
+                TokenSelect::Token1,
+            )?;
+            // burn fee  = 2/1000 * input_amount(the input token in our main token hopers)
+            // out_put token amount would not get affected
+            burn_fee_amount = get_protocol_fee_amount(
+                input_token_amount,
+                burn_fee_percent_numerator,
+                fees.fee_percent_denominator,
+            )?;
+            input_amount_minus_protocol_burn_fee =
+                input_token_amount - protocol_fee_amount - burn_fee_amount;
+        }
+        TokenSelect::Token2 => {
+            amount_to_transfer = get_input_price(
+                input_token_amount,
+                input_token.reserve,
+                transfer_token.reserve,
+                fees.fee_percent_numerator,
+                fees.fee_percent_denominator,
+                burn_fee_percent_numerator,
+                TokenSelect::Token2,
+            )?;
+            // we get burn_fee_amount after swap the other token as hopers
+            burn_fee_amount = get_protocol_fee_amount(
+                amount_to_transfer,
+                burn_fee_percent_numerator,
+                fees.fee_percent_denominator,
+            )?;
+            // amount_to_transfer amount must be decreased by burn_fee_percent
+            amount_to_transfer = get_protocol_fee_amount(
+                amount_to_transfer,
+                fees.fee_percent_denominator - burn_fee_percent_numerator,
+                fees.fee_percent_denominator,
+            )?;
+            input_amount_minus_protocol_burn_fee = input_token_amount - protocol_fee_amount;
+        }
+    };
 
     // Transfer input amount - protocol fee to contract
     let mut msgs: Vec<CosmosMsg> = vec![];
@@ -876,8 +1050,20 @@ pub fn execute_pass_through_swap(
             &info.sender,
             &_env.contract.address,
             addr,
-            input_amount_minus_protocol_fee,
+            input_amount_minus_protocol_burn_fee,
         )?)
+    };
+
+    match main_token_denom {
+        Denom::Cw20(addr) => match input_token_enum {
+            TokenSelect::Token1 => msgs.push(get_cw20_burn_from_msg(
+                &info.sender,
+                &addr,
+                burn_fee_amount,
+            )?),
+            TokenSelect::Token2 => msgs.push(get_cw20_burn_msg(&addr, burn_fee_amount)?),
+        },
+        Denom::Native(_) => {}
     };
 
     // Send protocol fee to protocol fee recipient
@@ -944,7 +1130,7 @@ pub fn execute_pass_through_swap(
         // Add input amount - protocol fee to input token reserve
         token.reserve = token
             .reserve
-            .checked_add(input_amount_minus_protocol_fee)
+            .checked_add(input_amount_minus_protocol_burn_fee)
             .map_err(StdError::overflow)?;
         Ok(token)
     })?;
@@ -958,6 +1144,7 @@ pub fn execute_pass_through_swap(
     })?;
 
     Ok(Response::new().add_messages(msgs).add_attributes(vec![
+        attr("action", action),
         attr("input_token_amount", input_token_amount),
         attr("native_transferred", amount_to_transfer),
     ]))
@@ -1002,12 +1189,16 @@ pub fn query_token1_for_token2_price(
     let token2 = TOKEN2.load(deps.storage)?;
 
     let fees = FEES.load(deps.storage)?;
+    let burn_fee_percent_numerator = BURN_FEE_INFO.load(deps.storage)?;
+
     let token2_amount = get_input_price(
         token1_amount,
         token1.reserve,
         token2.reserve,
         fees.fee_percent_numerator,
         fees.fee_percent_denominator,
+        burn_fee_percent_numerator,
+        TokenSelect::Token1,
     )?;
     Ok(Token1ForToken2PriceResponse { token2_amount })
 }
@@ -1020,6 +1211,7 @@ pub fn query_token2_for_token1_price(
     let token2 = TOKEN2.load(deps.storage)?;
 
     let fees = FEES.load(deps.storage)?;
+    let burn_fee_percent_numerator = BURN_FEE_INFO.load(deps.storage)?;
 
     let token1_amount = get_input_price(
         token2_amount,
@@ -1027,6 +1219,8 @@ pub fn query_token2_for_token1_price(
         token1.reserve,
         fees.fee_percent_numerator,
         fees.fee_percent_denominator,
+        burn_fee_percent_numerator,
+        TokenSelect::Token2,
     )?;
     Ok(Token2ForToken1PriceResponse { token1_amount })
 }
