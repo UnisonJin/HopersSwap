@@ -13,6 +13,7 @@ pub struct InstantiateMsg {
     pub owner: Option<String>,
     // NOTE: Fees percents are out of 100 e.g., 1 = 1%
     pub fee_percent_numerator: Uint128,
+    pub burn_fee_percent_numerator: Uint128,
     pub fee_percent_denominator: Uint128,
     pub lp_token_name: String,
     pub lp_token_symbol: String,
@@ -64,6 +65,7 @@ pub enum ExecuteMsg {
     UpdateConfig {
         owner: Option<String>,
         fee_percent_numerator: Uint128,
+        burn_fee_percent_numerator: Uint128,
         fee_percent_denominator: Uint128,
         dev_wallet_lists: Vec<WalletInfo>,
     },
@@ -86,7 +88,9 @@ pub enum QueryMsg {
     Fee {},
 }
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, JsonSchema)]
-pub struct MigrateMsg {}
+pub struct MigrateMsg {
+    pub burn_fee_percent_numerator: Uint128,
+}
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct InfoResponse {

@@ -76,6 +76,7 @@ fn create_amm(
         lp_token_code_id: cw20_id,
         owner: Some(owner.to_string()),
         fee_percent_numerator: Uint128::new(20),
+        burn_fee_percent_numerator: Uint128::new(10),
         fee_percent_denominator: Uint128::new(100),
         dev_wallet_lists,
         lp_token_name: "lp_token".to_string(),
@@ -176,6 +177,7 @@ fn test_instantiate() {
         lp_token_code_id: cw20_id,
         owner: Some(owner.to_string()),
         fee_percent_numerator: Uint128::new(20),
+        burn_fee_percent_numerator: Uint128::new(10),
         fee_percent_denominator: Uint128::new(100),
         dev_wallet_lists: vec![WalletInfo {
             address: owner.to_string(),
@@ -545,6 +547,7 @@ fn migrate() {
         lp_token_code_id: lp_token_id,
         owner: Some(owner.to_string()),
         fee_percent_numerator: Uint128::new(20),
+        burn_fee_percent_numerator: Uint128::new(10),
         fee_percent_denominator: Uint128::new(100),
         dev_wallet_lists: vec![WalletInfo {
             address: owner.to_string(),
@@ -566,7 +569,9 @@ fn migrate() {
 
     let fee = get_fee(&router, &amm_addr);
 
-    let migrate_msg = MigrateMsg {};
+    let migrate_msg = MigrateMsg {
+        burn_fee_percent_numerator: Uint128::new(5),
+    };
 
     router
         .execute(
@@ -1071,6 +1076,7 @@ fn update_config() {
             ratio: Decimal::one(),
         }],
         fee_percent_numerator: Uint128::new(20),
+        burn_fee_percent_numerator: Uint128::new(10),
         fee_percent_denominator: Uint128::new(100),
     };
     let _res = router
@@ -1090,6 +1096,7 @@ fn update_config() {
             ratio: Decimal::one(),
         }],
         fee_percent_numerator: Uint128::new(20),
+        burn_fee_percent_numerator: Uint128::new(10),
         fee_percent_denominator: Uint128::new(100),
     };
     let err = router
@@ -1115,6 +1122,7 @@ fn update_config() {
             ratio: Decimal::one(),
         }],
         fee_percent_numerator: Uint128::new(20),
+        burn_fee_percent_numerator: Uint128::new(10),
         fee_percent_denominator: Uint128::new(100),
     };
     let err = router
@@ -1137,6 +1145,7 @@ fn update_config() {
             ratio: Decimal::one(),
         }],
         fee_percent_numerator: Uint128::new(20),
+        burn_fee_percent_numerator: Uint128::new(10),
         fee_percent_denominator: Uint128::new(100),
     };
     let _res = router
@@ -1180,6 +1189,7 @@ fn swap_native_to_native_tokens_happy_path() {
         lp_token_code_id: lp_token_id,
         owner: Some(owner.to_string()),
         fee_percent_numerator: Uint128::new(20),
+        burn_fee_percent_numerator: Uint128::new(10),
         fee_percent_denominator: Uint128::new(100),
         dev_wallet_lists: vec![WalletInfo {
             address: owner.to_string(),
@@ -2019,7 +2029,10 @@ fn test_swap() {
         Uint128::new(10000),
         Uint128::new(20000),
         Uint128::new(5),
+        // Uint128::new(2),
         Uint128::new(1000),
+        Uint128::new(10),
+        TokenSelect::Token1,
     )
     .unwrap();
     println!("{:?}", amount);
