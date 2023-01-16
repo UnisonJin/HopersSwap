@@ -882,12 +882,20 @@ pub fn execute_swap(
 
     match main_token_denom {
         Denom::Cw20(addr) => match input_token_enum {
-            TokenSelect::Token1 => msgs.push(get_cw20_burn_from_msg(
-                &info.sender,
-                &addr,
-                burn_fee_amount,
-            )?),
-            TokenSelect::Token2 => msgs.push(get_cw20_burn_msg(&addr, burn_fee_amount)?),
+            TokenSelect::Token1 => {
+                if burn_fee_amount > Uint128::zero() {
+                    msgs.push(get_cw20_burn_from_msg(
+                        &info.sender,
+                        &addr,
+                        burn_fee_amount,
+                    )?)
+                }
+            }
+            TokenSelect::Token2 => {
+                if burn_fee_amount > Uint128::zero() {
+                    msgs.push(get_cw20_burn_msg(&addr, burn_fee_amount)?)
+                }
+            }
         },
         Denom::Native(_) => {}
     };
@@ -1056,12 +1064,20 @@ pub fn execute_pass_through_swap(
 
     match main_token_denom {
         Denom::Cw20(addr) => match input_token_enum {
-            TokenSelect::Token1 => msgs.push(get_cw20_burn_from_msg(
-                &info.sender,
-                &addr,
-                burn_fee_amount,
-            )?),
-            TokenSelect::Token2 => msgs.push(get_cw20_burn_msg(&addr, burn_fee_amount)?),
+            TokenSelect::Token1 => {
+                if burn_fee_amount > Uint128::zero() {
+                    msgs.push(get_cw20_burn_from_msg(
+                        &info.sender,
+                        &addr,
+                        burn_fee_amount,
+                    )?)
+                }
+            }
+            TokenSelect::Token2 => {
+                if burn_fee_amount > Uint128::zero() {
+                    msgs.push(get_cw20_burn_msg(&addr, burn_fee_amount)?)
+                }
+            }
         },
         Denom::Native(_) => {}
     };
@@ -1213,7 +1229,7 @@ pub fn query_token2_for_token1_price(
     let fees = FEES.load(deps.storage)?;
     let burn_fee_percent_numerator = BURN_FEE_INFO.load(deps.storage)?;
 
-    let token1_amount = get_input_price(
+    let mut token1_amount = get_input_price(
         token2_amount,
         token2.reserve,
         token1.reserve,
@@ -1222,6 +1238,13 @@ pub fn query_token2_for_token1_price(
         burn_fee_percent_numerator,
         TokenSelect::Token2,
     )?;
+
+    token1_amount = get_protocol_fee_amount(
+        token1_amount,
+        fees.fee_percent_denominator - burn_fee_percent_numerator,
+        fees.fee_percent_denominator,
+    )?;
+
     Ok(Token2ForToken1PriceResponse { token1_amount })
 }
 
@@ -1261,7 +1284,7 @@ pub fn reply(deps: DepsMut, _env: Env, msg: Reply) -> Result<Response, ContractE
 }
 
 #[cfg_attr(not(feature = "library"), entry_point)]
-pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, ContractError> {
+pub fn migrate(deps: DepsMut, _env: Env, msg: MigrateMsg) -> Result<Response, ContractError> {
     let version = get_contract_version(deps.storage)?;
     if version.contract != CONTRACT_NAME {
         return Err(ContractError::CannotMigrate {
@@ -1274,6 +1297,8 @@ pub fn migrate(deps: DepsMut, _env: Env, _msg: MigrateMsg) -> Result<Response, C
             previous_contract: version.version,
         });
     }
+
+    BURN_FEE_INFO.save(deps.storage, &msg.burn_fee_percent_numerator)?;
 
     Ok(Response::default())
 }
